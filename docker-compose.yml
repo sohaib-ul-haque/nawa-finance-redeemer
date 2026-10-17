@@ -1,0 +1,13 @@
+services:
+  nawa-finance-redeemer:
+    build: .
+    container_name: nawa-finance-redeemer
+    env_file: .env
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
