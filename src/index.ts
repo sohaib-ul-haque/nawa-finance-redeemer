@@ -2,7 +2,7 @@ import { ConfigError, describeConfig, loadConfig } from "./config";
 import { DedupeCache } from "./dedupe";
 import { EthereumMonitor } from "./ethereum";
 import { createLogger, errMsg, registerSecret, setLogLevel } from "./logger";
-import { TelegramNotifier } from "./telegram";
+import { TelegramCommandPoller, TelegramNotifier } from "./telegram";
 import { ZigChainMonitor } from "./zigchain";
 import type { AppConfig } from "./types";
 
@@ -60,6 +60,12 @@ async function main(): Promise<void> {
     monitors.push({ name: "ZIG", stop: () => zig.stop(), run: zig.start() });
   } else {
     log.info("no ZigChain vaults configured, ZigChain monitor disabled");
+  }
+
+  if (!cfg.telegram.dryRun && cfg.telegram.botToken) {
+    // Isolated from the chain monitors: its failures only back off and retry.
+    const poller = new TelegramCommandPoller(cfg.telegram.botToken);
+    monitors.push({ name: "TG", stop: async () => poller.stop(), run: poller.start() });
   }
 
   // Monitors loop internally and never reject; this is a last-resort guard.

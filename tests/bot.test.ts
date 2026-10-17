@@ -8,7 +8,7 @@ import { buildConfig } from "../src/config";
 import { DedupeCache, ethDedupeKey, zigDedupeKey } from "../src/dedupe";
 import { EthereumMonitor, VAULT_ABI, makePreviewRedeem, parsePendingTx } from "../src/ethereum";
 import { redact, registerSecret, setLogLevel } from "../src/logger";
-import { TelegramNotifier, formatAlert } from "../src/telegram";
+import { START_REPLY, TelegramCommandPoller, TelegramNotifier, formatAlert } from "../src/telegram";
 import { ZigChainMonitor, cometTxHash, decodeMempoolTx, makeRedemptionQuote, makeSmartQuery } from "../src/zigchain";
 import type { AlertSink, EthereumVaultConfig, RedeemAlert, ZigChainConfig, ZigVaultConfig } from "../src/types";
 
@@ -469,4 +469,69 @@ test("logger: redacts registered secrets and token-shaped strings", () => {
   assert.equal(redact("x supersecretvalue y"), "x *** y");
   assert.equal(redact("https://api.telegram.org/bot1234567890:AAHabcdefghijklmnopqrstuvwxyz012345/send"), "https://api.telegram.org/bot***/send");
   assert.equal(redact("wss://eth-mainnet.g.alchemy.com/v2/abc123"), "wss://eth-mainnet.g.alchemy.com/v2/***");
+});
+
+// ---------------- /start command ----------------
+
+function startPollerHarness() {
+  const sent: { url: string; body: any }[] = [];
+  const fakeFetch = (async (u: string, init: RequestInit) => {
+    sent.push({ url: u, body: JSON.parse(init.body as string) });
+    return new Response(JSON.stringify({ ok: true, result: {} }));
+  }) as unknown as typeof fetch;
+  return { sent, poller: new TelegramCommandPoller("tok", fakeFetch) };
+}
+
+test("/start replies with the exact expected message", async () => {
+  const { sent, poller } = startPollerHarness();
+  assert.equal(await poller.handleUpdate({ update_id: 10, message: { chat: { id: 42 }, text: "/start" } }), true);
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0]!.url.endsWith("/sendMessage"));
+  assert.equal(sent[0]!.body.chat_id, "42");
+  assert.equal(
+    sent[0]!.body.text,
+    "✅ NAWA Finance Redeemer Bot is running.\n\nMonitoring Ethereum and ZigChain pending redeem requests.",
+  );
+  assert.equal(sent[0]!.body.text, START_REPLY);
+});
+
+test('"hello" and other commands get no reply', async () => {
+  const { sent, poller } = startPollerHarness();
+  await poller.handleUpdate({ update_id: 1, message: { chat: { id: 42 }, text: "hello" } });
+  await poller.handleUpdate({ update_id: 2, message: { chat: { id: 42 }, text: "/help" } });
+  await poller.handleUpdate({ update_id: 3, message: { chat: { id: 42 }, text: "/startx" } });
+  await poller.handleUpdate({ update_id: 4, message: { chat: { id: 42 } } });
+  assert.equal(sent.length, 0);
+});
+
+test("duplicate /start update does not reply twice", async () => {
+  const { sent, poller } = startPollerHarness();
+  const u = { update_id: 77, message: { chat: { id: 42 }, text: "/start" } };
+  assert.equal(await poller.handleUpdate(u), true);
+  assert.equal(await poller.handleUpdate(u), false);
+  assert.equal(await poller.handleUpdate({ ...u, update_id: 70 }), false); // older than offset
+  assert.equal(sent.length, 1);
+});
+
+test("poller tracks offset across getUpdates calls and stops cleanly", async () => {
+  const calls: any[] = [];
+  let replies = 0;
+  let poller: TelegramCommandPoller;
+  const fakeFetch = (async (u: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string);
+    if (u.endsWith("/sendMessage")) {
+      replies++;
+      return new Response(JSON.stringify({ ok: true, result: {} }));
+    }
+    calls.push(body);
+    if (calls.length === 1) return new Response("{}", { status: 502 }); // transient failure -> backoff
+    if (calls.length >= 3) poller.stop();
+    // Server re-sends the same update (simulating a missed ack).
+    return new Response(JSON.stringify({ ok: true, result: [{ update_id: 5, message: { chat: { id: 1 }, text: "/start" } }] }));
+  }) as unknown as typeof fetch;
+  poller = new TelegramCommandPoller("tok", fakeFetch);
+  await poller.start();
+  assert.equal(calls[0].offset, 0);
+  assert.equal(calls[2].offset, 6);
+  assert.equal(replies, 1);
 });
